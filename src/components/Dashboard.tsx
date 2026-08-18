@@ -75,6 +75,18 @@ const getLocalDateString = () => {
   return `${year}-${month}-${day}`;
 };
 
+const isIdMatch = (id1: any, id2: any): boolean => {
+  if (!id1 || !id2) return false;
+  const s1 = String(id1).trim().toLowerCase();
+  const s2 = String(id2).trim().toLowerCase();
+  if (s1 === s2) return true;
+  try {
+    return toDeterministicUuid(s1).toLowerCase() === toDeterministicUuid(s2).toLowerCase();
+  } catch {
+    return false;
+  }
+};
+
 const getLocalDateStrFromVal = (val: any): string => {
   if (!val) return '';
   if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}/.test(val)) {
@@ -271,12 +283,29 @@ export default function Dashboard() {
         let matchedDoc = docId ? currentUsers.find((u: any) => u.id === docId) : null;
         
         const pId = apt.patient_id || apt.patientId;
-        const matchedPatient = patientsData ? patientsData.find((p: any) => p.id === pId) : null;
+        const matchedPatient = patientsData ? patientsData.find((p: any) => 
+          (p.name && !['walk-in patient', 'walk-in', 'unknown', ''].includes(p.name.toLowerCase().trim()) && (
+            isIdMatch(p.id, pId) || 
+            (p.mrn && (p.mrn === apt.patientMrn || p.mrn === apt.patient_mrn || p.mrn === apt.patient_id || p.mrn === apt.patientId)) ||
+            (p.name && (p.name.toLowerCase().trim() === (apt.patientName || '').toLowerCase().trim()))
+          )) || isIdMatch(p.id, pId)
+        ) : null;
         
-        const rawPatName = apt.patientName || apt.patients?.name || matchedPatient?.name || 'Unknown';
-        const cleanPatName = (rawPatName === 'Walk-in Patient' || rawPatName === 'Walk-In Patient') && matchedPatient?.name ? matchedPatient.name : rawPatName;
-        const rawPatMrn = apt.patientMrn || apt.patients?.mrn || matchedPatient?.mrn || 'N/A';
-        const cleanPatMrn = (rawPatName === 'Walk-in Patient' || rawPatName === 'Walk-In Patient') && matchedPatient?.mrn ? matchedPatient.mrn : rawPatMrn;
+        const isAptNameValid = apt.patientName && !['walk-in patient', 'walk-in', 'unknown', ''].includes(String(apt.patientName).toLowerCase().trim());
+        const isJoinedNameValid = apt.patients?.name && !['walk-in patient', 'walk-in', 'unknown', ''].includes(String(apt.patients.name).toLowerCase().trim());
+        const isMatchedNameValid = matchedPatient?.name && !['walk-in patient', 'walk-in', 'unknown', ''].includes(String(matchedPatient.name).toLowerCase().trim());
+
+        const cleanPatName = isAptNameValid 
+          ? apt.patientName 
+          : (isJoinedNameValid ? apt.patients.name : (isMatchedNameValid ? matchedPatient.name : (apt.patientName || 'Walk-in Patient')));
+
+        const isAptMrnValid = apt.patientMrn && !['n/a', 'none', '', 'null', 'undefined'].includes(String(apt.patientMrn).toLowerCase().trim());
+        const isJoinedMrnValid = apt.patients?.mrn && !['n/a', 'none', '', 'null', 'undefined'].includes(String(apt.patients.mrn).toLowerCase().trim());
+        const isMatchedMrnValid = matchedPatient?.mrn && !['n/a', 'none', '', 'null', 'undefined'].includes(String(matchedPatient.mrn).toLowerCase().trim());
+
+        const cleanPatMrn = isAptMrnValid 
+          ? apt.patientMrn 
+          : (isJoinedMrnValid ? apt.patients.mrn : (isMatchedMrnValid ? matchedPatient.mrn : (apt.patientMrn || 'N/A')));
 
         return {
           ...apt,
@@ -307,6 +336,7 @@ export default function Dashboard() {
     const synced = await supabaseService.createAppointment({
       patient_id: newApptPatientId,
       patientName: selectedPat?.name || undefined,
+      patientMrn: selectedPat?.mrn || undefined,
       doctor_id: doctorId,
       type: 'OPD',
       appointment_date: newApptDate,

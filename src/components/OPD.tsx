@@ -1353,16 +1353,29 @@ export default function OPD() {
             const doc = docId ? staffList.find((u: any) => isPatientIdMatch(u.id, docId) || (u.name && (u.name === apt.doctor || u.name === apt.doctorName))) : null;
             const pId = apt.patient_id || apt.patientId;
             const matchedPatient = patientsData ? patientsData.find((p: any) => 
-              isPatientIdMatch(p.id, pId) || 
-              (p.mrn && (p.mrn === apt.patientMrn || p.mrn === apt.patient_mrn || p.mrn === apt.patient_id || p.mrn === apt.patientId)) ||
-              (p.name && (p.name.toLowerCase().trim() === (apt.patientName || '').toLowerCase().trim() || p.name.toLowerCase().trim() === (apt.patient_name || '').toLowerCase().trim()))
+              (p.name && !['walk-in patient', 'walk-in', 'unknown', ''].includes(p.name.toLowerCase().trim()) && (
+                isPatientIdMatch(p.id, pId) || 
+                (p.mrn && (p.mrn === apt.patientMrn || p.mrn === apt.patient_mrn || p.mrn === apt.patient_id || p.mrn === apt.patientId)) ||
+                (p.name && (p.name.toLowerCase().trim() === (apt.patientName || '').toLowerCase().trim() || p.name.toLowerCase().trim() === (apt.patient_name || '').toLowerCase().trim()))
+              )) || isPatientIdMatch(p.id, pId)
             ) : null;
-            const rawPatName = apt.patientName || apt.patient_name || apt.patients?.name || matchedPatient?.name || 'Walk-in Patient';
-            const lowerRaw = rawPatName.toLowerCase().trim();
-            const isPlaceholder = lowerRaw === 'walk-in patient' || lowerRaw === 'walk-in' || lowerRaw === 'unknown' || lowerRaw === '';
-            const cleanPatName = isPlaceholder && matchedPatient?.name ? matchedPatient.name : rawPatName;
-            const rawPatMrn = apt.patientMrn || apt.patient_mrn || apt.patients?.mrn || matchedPatient?.mrn || 'N/A';
-            const cleanPatMrn = isPlaceholder && matchedPatient?.mrn ? matchedPatient.mrn : rawPatMrn;
+
+            const isAptNameValid = apt.patientName && !['walk-in patient', 'walk-in', 'unknown', ''].includes(String(apt.patientName).toLowerCase().trim());
+            const isJoinedNameValid = apt.patients?.name && !['walk-in patient', 'walk-in', 'unknown', ''].includes(String(apt.patients.name).toLowerCase().trim());
+            const isMatchedNameValid = matchedPatient?.name && !['walk-in patient', 'walk-in', 'unknown', ''].includes(String(matchedPatient.name).toLowerCase().trim());
+
+            const cleanPatName = isAptNameValid 
+              ? apt.patientName 
+              : (isJoinedNameValid ? apt.patients.name : (isMatchedNameValid ? matchedPatient.name : (apt.patientName || 'Walk-in Patient')));
+
+            const isAptMrnValid = apt.patientMrn && !['n/a', 'none', '', 'null', 'undefined'].includes(String(apt.patientMrn).toLowerCase().trim());
+            const isJoinedMrnValid = apt.patients?.mrn && !['n/a', 'none', '', 'null', 'undefined'].includes(String(apt.patients.mrn).toLowerCase().trim());
+            const isMatchedMrnValid = matchedPatient?.mrn && !['n/a', 'none', '', 'null', 'undefined'].includes(String(matchedPatient.mrn).toLowerCase().trim());
+
+            const cleanPatMrn = isAptMrnValid 
+              ? apt.patientMrn 
+              : (isJoinedMrnValid ? apt.patients.mrn : (isMatchedMrnValid ? matchedPatient.mrn : (apt.patientMrn || 'N/A')));
+
             const cleanDate = getCleanAppointmentDate(apt.appointment_date || apt.date || apt.created_at) || getLocalDateString();
 
             return {
@@ -2349,6 +2362,7 @@ export default function OPD() {
             const apptSynced = await supabaseService.createAppointment({
               patient_id: result.id,
               patientName: result.name,
+              patientMrn: result.mrn,
               doctor_id: doctorId,
               type: 'OPD',
               appointment_date: apptDate,
@@ -2606,6 +2620,7 @@ export default function OPD() {
           const apptSynced = await supabaseService.createAppointment({
             patient_id: synced.id,
             patientName: synced.name,
+            patientMrn: synced.mrn,
             doctor_id: doctorId,
             type: 'OPD',
             appointment_date: apptDate,
@@ -5776,13 +5791,29 @@ export default function OPD() {
                         </TableCell>
                       <TableCell className="whitespace-nowrap">
                         {(() => {
-                          const resolvedPat = patients.find(p => isPatientIdMatch(p.id, apt.patientId || apt.patient_id) || (p.mrn && p.mrn === apt.patientMrn) || (p.name && apt.patientName && p.name.toLowerCase() === apt.patientName.toLowerCase()));
-                          const displayName = apt.patientName && apt.patientName !== 'Walk-in Patient' && apt.patientName !== 'Unknown' 
+                          const resolvedPat = patients.find(p => 
+                            (p.name && !['walk-in patient', 'walk-in', 'unknown', ''].includes(p.name.toLowerCase().trim()) && (
+                              isPatientIdMatch(p.id, apt.patientId || apt.patient_id) || 
+                              (p.mrn && (p.mrn === apt.patientMrn || p.mrn === apt.patient_mrn || p.mrn === apt.patientId || p.mrn === apt.patient_id)) || 
+                              (p.name && apt.patientName && p.name.toLowerCase().trim() === String(apt.patientName).toLowerCase().trim())
+                            )) || isPatientIdMatch(p.id, apt.patientId || apt.patient_id)
+                          );
+                          const isAptNameValid = apt.patientName && !['walk-in patient', 'walk-in', 'unknown', ''].includes(String(apt.patientName).toLowerCase().trim());
+                          const isResolvedNameValid = resolvedPat?.name && !['walk-in patient', 'walk-in', 'unknown', ''].includes(String(resolvedPat.name).toLowerCase().trim());
+                          const isJoinedNameValid = apt.patients?.name && !['walk-in patient', 'walk-in', 'unknown', ''].includes(String(apt.patients.name).toLowerCase().trim());
+
+                          const displayName = isAptNameValid 
                             ? apt.patientName 
-                            : (resolvedPat?.name || apt.patientName || 'Walk-in Patient');
-                          const displayMrn = apt.patientMrn && apt.patientMrn !== 'N/A' 
+                            : (isJoinedNameValid ? apt.patients.name : (isResolvedNameValid ? resolvedPat.name : (apt.patientName || 'Walk-in Patient')));
+
+                          const isAptMrnValid = apt.patientMrn && !['n/a', 'none', '', 'null', 'undefined'].includes(String(apt.patientMrn).toLowerCase().trim());
+                          const isJoinedMrnValid = apt.patients?.mrn && !['n/a', 'none', '', 'null', 'undefined'].includes(String(apt.patients.mrn).toLowerCase().trim());
+                          const isResolvedMrnValid = resolvedPat?.mrn && !['n/a', 'none', '', 'null', 'undefined'].includes(String(resolvedPat.mrn).toLowerCase().trim());
+
+                          const displayMrn = isAptMrnValid 
                             ? apt.patientMrn 
-                            : (resolvedPat?.mrn || apt.patientMrn || 'N/A');
+                            : (isJoinedMrnValid ? apt.patients.mrn : (isResolvedMrnValid ? resolvedPat.mrn : (apt.patientMrn || 'N/A')));
+
                           return (
                             <div>
                               <p className="font-semibold text-slate-900">{displayName}</p>

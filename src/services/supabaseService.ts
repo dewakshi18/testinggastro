@@ -425,7 +425,21 @@ function cleanAppointmentForPostgres(apt: any) {
     }
 
     // Encode patient name & MRN inside urgency
-    const patName = cleaned.patientName || cleaned.patient_name || cleaned.patient?.name || cleaned.patients?.name;
+    let patName = cleaned.patientName || cleaned.patient_name || cleaned.patient?.name || cleaned.patients?.name;
+    let patMrn = cleaned.patientMrn || cleaned.patient_mrn || cleaned.patient?.mrn || cleaned.patients?.mrn;
+
+    if (!patName || ['walk-in', 'walk-in patient', 'unknown', 'n/a', ''].includes(String(patName).toLowerCase().trim())) {
+      const pid = cleaned.patient_id || cleaned.patientId;
+      if (pid) {
+        const localPatients = storage.get(STORAGE_KEYS.PATIENTS, MOCK_PATIENTS) || [];
+        const found = localPatients.find((p: any) => isIdMatch(p.id, pid) || p.mrn === pid);
+        if (found && found.name && !['walk-in', 'walk-in patient', 'unknown', 'n/a', ''].includes(found.name.toLowerCase().trim())) {
+          patName = found.name;
+          if (!patMrn || patMrn === 'N/A') patMrn = found.mrn;
+        }
+      }
+    }
+
     if (patName) {
       const safePatName = String(patName).replace(/[\[\]]/g, '').trim();
       if (safePatName && !['walk-in', 'walk-in patient', 'unknown', 'n/a', ''].includes(safePatName.toLowerCase())) {
@@ -433,7 +447,6 @@ function cleanAppointmentForPostgres(apt: any) {
         urgencyVal = `${urgencyVal} [pat:${safePatName}]`;
       }
     }
-    const patMrn = cleaned.patientMrn || cleaned.patient_mrn || cleaned.patient?.mrn || cleaned.patients?.mrn;
     if (patMrn) {
       const safePatMrn = String(patMrn).replace(/[\[\]]/g, '').trim();
       if (safePatMrn && !['n/a', 'none', ''].includes(safePatMrn.toLowerCase())) {
@@ -655,33 +668,87 @@ function mapAppointmentFromPostgres(apt: any) {
   }
 
   const patientsList = storage.get(STORAGE_KEYS.PATIENTS, MOCK_PATIENTS) || [];
+  const billingList = storage.get(STORAGE_KEYS.BILLING, MOCK_BILLING) || [];
   const pid = mapped.patient_id || mapped.patientId;
   
-  const p = patientsList.find((p_item: any) => isIdMatch(p_item.id, pid) || p_item.mrn === pid || (p_item.name && patientNameParsed && p_item.name.toLowerCase().trim() === patientNameParsed.toLowerCase().trim()));
+  const p = patientsList.find((p_item: any) => 
+    isIdMatch(p_item.id, pid) || 
+    p_item.mrn === pid || 
+    (p_item.name && patientNameParsed && p_item.name.toLowerCase().trim() === patientNameParsed.toLowerCase().trim())
+  );
 
-  if (!mapped.patients) {
-    if (p) {
-      mapped.patients = { name: p.name, mrn: p.mrn, age: p.age, gender: p.gender };
-    } else if (patientNameParsed) {
-      mapped.patients = { name: patientNameParsed, mrn: patientMrnParsed || 'N/A' };
-    }
-  } else {
-    const existingName = (mapped.patients.name || '').toLowerCase().trim();
-    if (p && p.name && (existingName === 'walk-in patient' || existingName === 'walk-in' || existingName === 'unknown' || existingName === '')) {
-      mapped.patients.name = p.name;
-      if (p.mrn) mapped.patients.mrn = p.mrn;
-    } else if (patientNameParsed && (existingName === 'walk-in patient' || existingName === 'walk-in' || existingName === 'unknown' || existingName === '')) {
-      mapped.patients.name = patientNameParsed;
-      if (patientMrnParsed) mapped.patients.mrn = patientMrnParsed;
-    }
+  const isGenericName = (nameStr?: string) => {
+    if (!nameStr) return true;
+    const s = String(nameStr).toLowerCase().trim();
+    return s === '' || s === 'walk-in' || s === 'walk-in patient' || s === 'unknown' || s === 'n/a' || s === 'none';
+  };
+
+  const isGenericMrn = (mrnStr?: string) => {
+    if (!mrnStr) return true;
+    const s = String(mrnStr).toLowerCase().trim();
+    return s === '' || s === 'n/a' || s === 'none' || s === 'null' || s === 'undefined';
+  };
+
+  // Cross-reference with billing if applicable
+  const matchingBill = billingList.find((b: any) => 
+    (mapped.id && (b.appointment_id === mapped.id || b.appointmentId === mapped.id)) ||
+    (pid && (b.patient_id === pid || b.patientId === pid))
+  );
+  const billPatName = matchingBill?.patient_name || matchingBill?.patientName || matchingBill?.patients?.name;
+  const billPatMrn = matchingBill?.patient_mrn || matchingBill?.patientMrn || matchingBill?.patients?.mrn;
+
+  // Determine highest priority non-generic patient name
+  let bestName = '';
+  if (!isGenericName(patientNameParsed)) {
+    bestName = patientNameParsed;
+  } else if (mapped.patients && !isGenericName(mapped.patients.name)) {
+    bestName = mapped.patients.name;
+  } else if (p && !isGenericName(p.name)) {
+    bestName = p.name;
+  } else if (billPatName && !isGenericName(billPatName)) {
+    bestName = billPatName;
+  } else if (mapped.patientName && !isGenericName(mapped.patientName)) {
+    bestName = mapped.patientName;
+  } else if (mapped.patient_name && !isGenericName(mapped.patient_name)) {
+    bestName = mapped.patient_name;
   }
 
-  if (mapped.patients) {
-    mapped.patientName = mapped.patients.name;
-    mapped.patientMrn = mapped.patients.mrn;
-  } else if (patientNameParsed) {
-    mapped.patientName = patientNameParsed;
-    mapped.patientMrn = patientMrnParsed || 'N/A';
+  // Determine highest priority non-generic MRN
+  let bestMrn = '';
+  if (!isGenericMrn(patientMrnParsed)) {
+    bestMrn = patientMrnParsed;
+  } else if (mapped.patients && !isGenericMrn(mapped.patients.mrn)) {
+    bestMrn = mapped.patients.mrn;
+  } else if (p && !isGenericMrn(p.mrn)) {
+    bestMrn = p.mrn;
+  } else if (billPatMrn && !isGenericMrn(billPatMrn)) {
+    bestMrn = billPatMrn;
+  } else if (mapped.patientMrn && !isGenericMrn(mapped.patientMrn)) {
+    bestMrn = mapped.patientMrn;
+  }
+
+  if (bestName) {
+    if (!mapped.patients) {
+      mapped.patients = { 
+        name: bestName, 
+        mrn: bestMrn || 'N/A', 
+        age: p?.age || mapped.age || mapped.patientAge || null, 
+        gender: p?.gender || mapped.gender || mapped.patientGender || 'Male' 
+      };
+    } else {
+      mapped.patients.name = bestName;
+      if (bestMrn) mapped.patients.mrn = bestMrn;
+    }
+    mapped.patientName = bestName;
+    mapped.patientMrn = bestMrn || 'N/A';
+  } else {
+    if (mapped.patients) {
+      mapped.patientName = mapped.patients.name || 'Walk-in Patient';
+      mapped.patientMrn = mapped.patients.mrn || 'N/A';
+    } else {
+      mapped.patientName = mapped.patientName || 'Walk-in Patient';
+      mapped.patientMrn = mapped.patientMrn || 'N/A';
+    }
   }
 
   if (mapped.appointment_time) {
