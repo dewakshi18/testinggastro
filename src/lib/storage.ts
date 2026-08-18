@@ -1,0 +1,333 @@
+
+export function isLiveEnvironment(): boolean {
+  if (typeof window === 'undefined') return false;
+  const hostname = window.location.hostname;
+  if (!hostname || hostname === 'localhost' || hostname === '127.0.0.1') return false;
+  if (hostname.includes('ais-dev') || hostname.includes('ais-pre')) return false;
+  return true;
+}
+
+function isSupabaseConfig(): boolean {
+  try {
+    const getCleanItem = (key: string): string | null => {
+      if (typeof window === 'undefined') return null;
+      const val = localStorage.getItem(key);
+      if (!val || typeof val !== 'string') return null;
+      const trimmed = val.trim();
+      if (trimmed === '' || trimmed === 'null' || trimmed === 'undefined' || trimmed === 'placeholder-key' || trimmed.includes('placeholder')) {
+        return null;
+      }
+      return trimmed;
+    };
+
+    const getEnvVal = (key: string): string | null => {
+      // Try static lookup first for Vite replacement compatibility
+      let val: string | undefined | null = null;
+      if (key === 'VITE_SUPABASE_URL') {
+        val = import.meta.env.VITE_SUPABASE_URL;
+      } else if (key === 'VITE_SUPABASE_ANON_KEY') {
+        val = import.meta.env.VITE_SUPABASE_ANON_KEY;
+      } else if (key === 'SUPABASE_URL') {
+        val = import.meta.env.SUPABASE_URL;
+      } else if (key === 'SUPABASE_ANON_KEY') {
+        val = import.meta.env.SUPABASE_ANON_KEY;
+      }
+
+      // Fallback to dynamic lookup if not matched
+      if (!val) {
+        if (typeof import.meta !== 'undefined' && import.meta.env && typeof import.meta.env[key] === 'string') {
+          val = import.meta.env[key];
+        }
+      }
+      if (!val) {
+        if (typeof process !== 'undefined' && process.env && typeof process.env[key] === 'string') {
+          val = process.env[key];
+        }
+      }
+
+      if (val) {
+        const trimmed = val.trim();
+        if (trimmed !== '' && trimmed !== 'null' && trimmed !== 'undefined' && trimmed !== 'placeholder-key' && !trimmed.includes('placeholder')) {
+          return trimmed;
+        }
+      }
+      return null;
+    };
+
+    const url = getCleanItem('hms_supabase_url') || 
+                getEnvVal('VITE_SUPABASE_URL') || 
+                getEnvVal('SUPABASE_URL') || 
+                'https://iazonufxhycppyzwhnvq.supabase.co';
+
+    const key = getCleanItem('hms_supabase_anon_key') || 
+                getEnvVal('VITE_SUPABASE_ANON_KEY') || 
+                getEnvVal('SUPABASE_ANON_KEY') || 
+                'sb_publishable_YZ2ygAm-HII4qdQZmlIOLQ_kkNW5dpV';
+
+    if (url && key && 
+        (url.startsWith('http://') || url.startsWith('https://')) && 
+        !url.includes('placeholder')) {
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
+function isMockId(id: any): boolean {
+  if (!id || typeof id !== 'string') return false;
+  return /^(p|a|bill|i|rx|ot|op|ns|nt)\d+$/.test(id);
+}
+
+function sanitizeStorageValue(key: string, val: any): any {
+  if (!val) return val;
+  
+  if (!(isLiveEnvironment() || isSupabaseConfig())) {
+    return val;
+  }
+  
+  // Clean beds association
+  if (key === 'hms_beds' && Array.isArray(val)) {
+    return val.map((bed: any) => ({
+      ...bed,
+      status: 'Available',
+      patientId: undefined,
+      patient_id: undefined
+    }));
+  }
+
+  // Clean OT Room associations
+  if (key === 'hms_ot_rooms' && Array.isArray(val)) {
+    return val.map((room: any) => ({
+      ...room,
+      status: 'Available'
+    }));
+  }
+  
+  // Under live or configured Supabase, strip mock transaction/patient items
+  if (Array.isArray(val)) {
+    return val.filter((item: any) => {
+      if (!item) return false;
+      if (item.id && isMockId(item.id)) return false;
+      if (item.cat_id && isMockId(item.cat_id)) return false;
+      if (item.subcat_id && isMockId(item.subcat_id)) return false;
+      if (item.unit_id && isMockId(item.unit_id)) return false;
+      if (item.patientId && isMockId(item.patientId)) return false;
+      if (item.patient_id && isMockId(item.patient_id)) return false;
+      if (item.pat_id && isMockId(item.pat_id)) return false;
+      return true;
+    });
+  }
+  
+  if (typeof val === 'object') {
+    if (val.id && isMockId(val.id)) return null;
+    if (val.patientId && isMockId(val.patientId)) return null;
+    if (val.patient_id && isMockId(val.patient_id)) return null;
+  }
+  
+  return val;
+}
+
+export const storage = {
+  get: <T>(key: string, defaultValue: T): T => {
+    try {
+      const item = localStorage.getItem(key);
+      const parsed = item ? JSON.parse(item) : defaultValue;
+      return sanitizeStorageValue(key, parsed) as T;
+    } catch (error) {
+      console.error(`Error reading storage key "${key}":`, error);
+      return sanitizeStorageValue(key, defaultValue) as T;
+    }
+  },
+  set: <T>(key: string, value: T): void => {
+    try {
+      const stringifiedValue = JSON.stringify(value);
+      const existing = localStorage.getItem(key);
+      if (existing === stringifiedValue) {
+        return; // Avoid redundant writes and infinite render/sync loops!
+      }
+      localStorage.setItem(key, stringifiedValue);
+      
+      if (typeof window !== 'undefined') {
+        // Dispatch asynchronously to prevent interrupting any active React render cycles
+        if (typeof queueMicrotask === 'function') {
+          queueMicrotask(() => {
+            try {
+              window.dispatchEvent(new CustomEvent('supabase-data-sync', {
+                detail: { table: key, action: 'update', local: true }
+              }));
+              window.dispatchEvent(new StorageEvent('storage', {
+                key: key,
+                newValue: stringifiedValue,
+                storageArea: localStorage
+              }));
+            } catch (err) {}
+          });
+        } else {
+          setTimeout(() => {
+            try {
+              window.dispatchEvent(new CustomEvent('supabase-data-sync', {
+                detail: { table: key, action: 'update', local: true }
+              }));
+              window.dispatchEvent(new StorageEvent('storage', {
+                key: key,
+                newValue: stringifiedValue,
+                storageArea: localStorage
+              }));
+            } catch (err) {}
+          }, 0);
+        }
+
+        // Broadcast to other tabs/panels on the same device using BroadcastChannel
+        if (typeof BroadcastChannel !== 'undefined') {
+          try {
+            const channel = new BroadcastChannel('hms-local-sync');
+            channel.postMessage({ key, value });
+            channel.close();
+          } catch (e) {
+            console.warn('BroadcastChannel sync error:', e);
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`Error writing storage key "${key}":`, error);
+    }
+  },
+  remove: (key: string): void => {
+    try {
+      localStorage.removeItem(key);
+      
+      if (typeof window !== 'undefined') {
+        if (typeof queueMicrotask === 'function') {
+          queueMicrotask(() => {
+            try {
+              window.dispatchEvent(new CustomEvent('supabase-data-sync', {
+                detail: { table: key, action: 'delete', local: true }
+              }));
+              window.dispatchEvent(new StorageEvent('storage', {
+                key: key,
+                newValue: null,
+                storageArea: localStorage
+              }));
+            } catch (err) {}
+          });
+        } else {
+          setTimeout(() => {
+            try {
+              window.dispatchEvent(new CustomEvent('supabase-data-sync', {
+                detail: { table: key, action: 'delete', local: true }
+              }));
+              window.dispatchEvent(new StorageEvent('storage', {
+                key: key,
+                newValue: null,
+                storageArea: localStorage
+              }));
+            } catch (err) {}
+          }, 0);
+        }
+
+        if (typeof BroadcastChannel !== 'undefined') {
+          try {
+            const channel = new BroadcastChannel('hms-local-sync');
+            channel.postMessage({ key, value: null });
+            channel.close();
+          } catch (e) {}
+        }
+      }
+    } catch (error) {
+      console.error(`Error removing storage key "${key}":`, error);
+    }
+  },
+  clear: (): void => {
+    try {
+      localStorage.clear();
+      
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('supabase-data-sync', {
+          detail: { table: 'all', action: 'delete', local: true }
+        }));
+        
+        window.dispatchEvent(new StorageEvent('storage', {
+          key: null,
+          newValue: null,
+          storageArea: localStorage
+        }));
+
+        if (typeof BroadcastChannel !== 'undefined') {
+          try {
+            const channel = new BroadcastChannel('hms-local-sync');
+            channel.postMessage({ key: 'all', value: null });
+            channel.close();
+          } catch (e) {}
+        }
+      }
+    } catch (error) {
+      console.error("Error clearing storage:", error);
+    }
+  }
+};
+
+// Global cross-tab and cross-window sync listener
+if (typeof window !== 'undefined' && typeof BroadcastChannel !== 'undefined') {
+  try {
+    const globalSyncChannel = new BroadcastChannel('hms-local-sync');
+    globalSyncChannel.onmessage = (event) => {
+      const data = event.data;
+      if (data && data.key) {
+        window.dispatchEvent(new CustomEvent('supabase-data-sync', {
+          detail: { table: data.key, action: data.value === null ? 'delete' : 'update', broadcast: true }
+        }));
+      }
+    };
+  } catch (e) {
+    console.warn('Could not initialize persistent BroadcastChannel listener:', e);
+  }
+}
+
+export const STORAGE_KEYS = {
+  PATIENTS: 'hms_patients',
+  APPOINTMENTS: 'hms_appointments',
+  BILLING: 'hms_billing',
+  LAB_BILLS: 'hms_lab_bills',
+  INVENTORY: 'hms_inventory',
+  EXPENSES: 'hms_expenses',
+  INSURANCE: 'hms_insurance',
+  NURSING_TASKS: 'hms_nursing_tasks',
+  BEDS: 'hms_beds',
+  PHARMACY_BILLS: 'hms_pharmacy_billing',
+  PRESCRIPTIONS: 'hms_prescriptions',
+  TEMPLATE_IMAGE: 'hms_template_image',
+  BED_RATES: 'hms_bed_rates',
+  OT_RATES: 'hms_ot_rates',
+  LAB_RATES: 'hms_lab_rates',
+  MATERIAL_RATES: 'hms_material_rates',
+  HOSPITAL_INFO: 'hms_hospital_info',
+  USERS: 'hms_users',
+  AUDIT_LOGS: 'hms_audit_logs',
+  SESSION_USER: 'hms_session_user',
+  AUTH_STATUS: 'hms_auth_status',
+  LAB_TEST_ORDERS: 'hms_lab_test_orders',
+  EXTERNAL_REPORTS: 'hms_external_reports',
+  RADIOLOGY_FILES: 'hms_radiology_files',
+  PATIENT_VITALS: 'hms_patient_vitals',
+  TAX_SLABS: 'hms_tax_slabs',
+  CATEGORY_TAX_MAPPING: 'hms_category_tax_mapping',
+  HOSPITAL_TAX_SETTINGS: 'hms_hospital_tax_settings',
+  OPD_CHARGES: 'hms_opd_charges',
+  TOKEN_PRINT_SIZE: 'hms_token_print_size',
+  EQUIPMENT: 'hms_equipment',
+  BREAKDOWNS: 'hms_breakdowns',
+  PRESCRIPTION_TEMPLATES: 'hms_prescription_templates',
+  BED_TRANSFERS: 'hms_bed_transfers',
+  STAFF_ATTENDANCE: 'hms_staff_attendance',
+  SPECIAL_CLINICAL_CHARTS: 'hms_special_clinical_charts',
+  ENDOSCOPY_DIRECT_PROCEDURES: 'hms_endoscopy_direct_procedures',
+  CAREWELL_OT_SUMMARY_FORMS: 'hms_carewell_ot_summary_forms',
+  CAREWELL_PREOP_ORDERS: 'hms_carewell_preop_orders',
+  VISITING_SPECIALISTS: 'hms_visiting_specialists',
+  VISITING_CONSULTATIONS: 'hms_visiting_consultations',
+  CENTRAL_COUNTER_PAYMENTS: 'hms_central_counter_payments',
+  ENDO_PROCEDURE_RATES: 'hms_endo_procedure_rates',
+  ENDOSCOPY_SCOPE_DISINFECTION_LOGS: 'hms_endoscopy_scope_disinfection_logs',
+  ENDOSCOPY_SAFETY_CHECKLISTS: 'hms_endoscopy_safety_checklists',
+  EMERGENCY_RESUSCITATION_LOGS: 'hms_emergency_resuscitation_logs',
+};
